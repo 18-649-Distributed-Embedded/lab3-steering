@@ -1,10 +1,72 @@
 #include "sys/blinkers_control.h"
+#include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
+#include "sys/can_rx.h"
+#include "core/can_catalog.h"
+#include "core/cmd.h"
 #include "hw/blinkers.h"
+
+#define BLINK_R_THREAD_STACK  512
+#define BLINK_R_THREAD_PRIO   4
+
+static void blink_r_thread_func(void *p1, void *p2, void *p3)
+{
+    while (1) {
+        /*
+         * Wait for BLINK message, or timeout after 50ms so local fail-safe
+         * hazards can flash if communication is lost.
+         */
+        k_sem_take(&sem_blink, K_MSEC(50));
+
+        bool is_failsafe = (atomic_get(&system_safety_flags) != 0);
+
+        if (is_failsafe) {
+            /* Fail-safe / error state: local 1Hz hazard flashing (500ms period) */
+            uint32_t now = k_uptime_get_32();
+            bool on = (now % 500U) < 250U;
+            blinkers_set_left(on);
+            blinkers_set_right(on);
+        } else {
+            uint32_t val        = (uint32_t)atomic_get(&mailbox_blinker);
+            uint8_t blink_state = (val >> 8) & 0xFF;
+            uint8_t phase_bit   = (val     ) & 0xFF;
+
+            bool on = (phase_bit != 0);
+
+            blinkers_set_left(false);
+            blinkers_set_right(false);
+
+            switch (blink_state) {
+            case CAN_BLINK_LEFT:
+                blinkers_set_left(on);
+                break;
+            case CAN_BLINK_RIGHT:
+                blinkers_set_right(on);
+                break;
+            case CAN_BLINK_HAZARD:
+                blinkers_set_left(on);
+                blinkers_set_right(on);
+                break;
+            case CAN_BLINK_OFF:
+            default:
+                break;
+            }
+        }
+    }
+}
+
+K_THREAD_STACK_DEFINE(blink_r_stack, BLINK_R_THREAD_STACK);
+static struct k_thread blink_r_thread_data;
 
 void blinkers_control_init(void)
 {
-    /* Safe-state: all LEDs off */
     blinkers_set_left(false);
     blinkers_set_right(false);
-    /* Thread removed for Lab 3 Part 1 — will be re-added in Part 2 */
+
+    k_thread_create(&blink_r_thread_data, blink_r_stack,
+                    K_THREAD_STACK_SIZEOF(blink_r_stack),
+                    blink_r_thread_func,
+                    NULL, NULL, NULL,
+                    BLINK_R_THREAD_PRIO, 0, K_NO_WAIT);
+    k_thread_name_set(&blink_r_thread_data, "BLINK_R");
 }

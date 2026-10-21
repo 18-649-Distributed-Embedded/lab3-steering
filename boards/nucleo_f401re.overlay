@@ -100,3 +100,21 @@
     pinctrl-0 = <&adc1_in8_pb0>;
     pinctrl-names = "default";
 };
+
+// Degraded-bus status LEDs (R4.7)
+/ {
+    leds {
+        deg_a_led: deg_a {
+            gpios = <&gpioc 8 GPIO_ACTIVE_HIGH>;
+            label = "DEG A";
+        };
+        deg_b_led: deg_b {
+            gpios = <&gpioc 9 GPIO_ACTIVE_HIGH>;
+            label = "DEG B";
+        };
+    };
+    aliases {
+        deg-a = &deg_a_led;
+        deg-b = &deg_b_led;
+    };
+};

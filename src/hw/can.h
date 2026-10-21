@@ -20,6 +20,11 @@ int can_bus_init(void);
 void can_log_state(void);
 
 /**
+ * @brief Transmit a frame on a specific CAN bus with TX GPIO test point pulsing.
+ */
+int can_send_bus(const struct device *dev, struct can_frame *frame, k_timeout_t timeout);
+
+/**
  * @brief Transmit an identical frame on BOTH CAN buses.
  * @param id   11-bit CAN standard frame ID
  * @param dlc  Data length (0-8)

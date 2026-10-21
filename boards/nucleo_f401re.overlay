@@ -112,9 +112,29 @@
             gpios = <&gpioc 9 GPIO_ACTIVE_HIGH>;
             label = "DEG B";
         };
+        can0_rx_tp: can0_rx {
+            gpios = <&gpioc 4 GPIO_ACTIVE_HIGH>;
+            label = "CAN0 RX Test Point";
+        };
+        can1_rx_tp: can1_rx {
+            gpios = <&gpioc 5 GPIO_ACTIVE_HIGH>;
+            label = "CAN1 RX Test Point";
+        };
+        can0_tx_tp: can0_tx {
+            gpios = <&gpioc 6 GPIO_ACTIVE_HIGH>;
+            label = "CAN0 TX Test Point";
+        };
+        can1_tx_tp: can1_tx {
+            gpios = <&gpioc 7 GPIO_ACTIVE_HIGH>;
+            label = "CAN1 TX Test Point";
+        };
     };
     aliases {
         deg-a = &deg_a_led;
         deg-b = &deg_b_led;
+        can0-rx = &can0_rx_tp;
+        can1-rx = &can1_rx_tp;
+        can0-tx = &can0_tx_tp;
+        can1-tx = &can1_tx_tp;
     };
 };

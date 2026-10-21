@@ -1,11 +1,15 @@
 #include "sys/can_rx.h"
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/can.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/sys/atomic.h>
 #include "hw/can.h"
 #include "core/can_catalog.h"
 #include "core/cmd.h"
 #include "core/log.h"
+
+static const struct gpio_dt_spec can0_rx_tp = GPIO_DT_SPEC_GET(DT_ALIAS(can0_rx), gpios);
+static const struct gpio_dt_spec can1_rx_tp = GPIO_DT_SPEC_GET(DT_ALIAS(can1_rx), gpios);
 
 /* ── IPC primitives ─────────────────────────────────────── */
 K_SEM_DEFINE(sem_ctrl,  0, 1);
@@ -77,7 +81,12 @@ static void rx_dispatch(const struct device *dev,
                         struct can_frame *frame,
                         void *user_data)
 {
-    int bus = (int)(uintptr_t)user_data;    /* 0 = A, 1 = B */
+    int bus = (int)(uintptr_t)user_data;    /* 0 = A (CAN0), 1 = B (CAN1) */
+    const struct gpio_dt_spec *rx_tp = (bus == 0) ? &can0_rx_tp : &can1_rx_tp;
+
+    /* Set RX TP HIGH immediately after SPI read callback fires */
+    gpio_pin_set_dt(rx_tp, 1);
+
     uint32_t now = k_uptime_get_32();
 
     /* Track reception timestamp per bus before deduplication */
@@ -90,68 +99,77 @@ static void rx_dispatch(const struct device *dev,
     }
 
     uint8_t seq = can_seq(frame->data[0]);
-    if (!dedup_accept(frame->id, seq)) {
-        return;   /* duplicate — payload already processed */
-    }
+    if (dedup_accept(frame->id, seq)) {
+        switch (frame->id) {
 
-    switch (frame->id) {
-
-    case CAN_ID_CTRL: {
-        uint8_t throttle = frame->data[3];
-        uint8_t brake    = frame->data[4];
-        uint8_t buttons  = frame->data[5];
-        uint32_t val = ((uint32_t)buttons  << 16) |
-                       ((uint32_t)throttle <<  8) |
-                       ((uint32_t)brake);
-        atomic_set(&mailbox_ctrl, (atomic_val_t)val);
-        last_ctrl_time = now;
-        k_sem_give(&sem_ctrl);
-        break;
-    }
-
-    case CAN_ID_FAULT: {
-        uint8_t zone_id = frame->data[1];
-        uint8_t reason  = frame->data[2];
-        if (reason == 0) {
-            /* Fault cleared */
-            atomic_clear_bit(&system_safety_flags, SAFETY_FLAG_PEER_FAULT);
-            DEBUG_PRINT("FAULT CLEARED: zone=%u\n", zone_id);
-        } else {
-            atomic_set_bit(&system_safety_flags, SAFETY_FLAG_PEER_FAULT);
-            DEBUG_PRINT("FAULT RX: zone=%u reason=%u\n", zone_id, reason);
+        case CAN_ID_CTRL: {
+            uint8_t throttle = frame->data[3];
+            uint8_t brake    = frame->data[4];
+            uint8_t buttons  = frame->data[5];
+            uint32_t val = ((uint32_t)buttons  << 16) |
+                           ((uint32_t)throttle <<  8) |
+                           ((uint32_t)brake);
+            atomic_set(&mailbox_ctrl, (atomic_val_t)val);
+            last_ctrl_time = now;
+            k_sem_give(&sem_ctrl);
+            break;
         }
-        break;
+
+        case CAN_ID_FAULT: {
+            uint8_t zone_id = frame->data[1];
+            uint8_t reason  = frame->data[2];
+            if (reason == 0) {
+                /* Fault cleared */
+                atomic_clear_bit(&system_safety_flags, SAFETY_FLAG_PEER_FAULT);
+                DEBUG_PRINT("FAULT CLEARED: zone=%u\n", zone_id);
+            } else {
+                atomic_set_bit(&system_safety_flags, SAFETY_FLAG_PEER_FAULT);
+                DEBUG_PRINT("FAULT RX: zone=%u reason=%u\n", zone_id, reason);
+            }
+            break;
+        }
+
+        case CAN_ID_HB_N1: {
+            uint8_t zone_state = frame->data[1];
+            atomic_set(&mailbox_n1_state, (atomic_val_t)zone_state);
+            break;
+        }
+
+        case CAN_ID_HB_N2: {
+            uint8_t zone_state = frame->data[1];
+            atomic_set(&mailbox_n2_state, (atomic_val_t)zone_state);
+            break;
+        }
+
+        case CAN_ID_BLINK: {
+            uint8_t blink_state = frame->data[1];
+            uint8_t phase_bit   = frame->data[2];
+            uint32_t val = ((uint32_t)blink_state << 8) | (uint32_t)phase_bit;
+            atomic_set(&mailbox_blinker, (atomic_val_t)val);
+            k_sem_give(&sem_blink);
+            break;
+        }
+
+        default:
+            break;
+        }
     }
 
-    case CAN_ID_HB_N1: {
-        uint8_t zone_state = frame->data[1];
-        atomic_set(&mailbox_n1_state, (atomic_val_t)zone_state);
-        break;
-    }
-
-    case CAN_ID_HB_N2: {
-        uint8_t zone_state = frame->data[1];
-        atomic_set(&mailbox_n2_state, (atomic_val_t)zone_state);
-        break;
-    }
-
-    case CAN_ID_BLINK: {
-        uint8_t blink_state = frame->data[1];
-        uint8_t phase_bit   = frame->data[2];
-        uint32_t val = ((uint32_t)blink_state << 8) | (uint32_t)phase_bit;
-        atomic_set(&mailbox_blinker, (atomic_val_t)val);
-        k_sem_give(&sem_blink);
-        break;
-    }
-
-    default:
-        break;
-    }
+    /* Set RX TP LOW once ingestion/dispatch is finished */
+    gpio_pin_set_dt(rx_tp, 0);
 }
 
 /* ── Init ────────────────────────────────────────────────── */
 void can_rx_init(void)
 {
+    /* Initialize RX test point GPIOs */
+    if (device_is_ready(can0_rx_tp.port)) {
+        gpio_pin_configure_dt(&can0_rx_tp, GPIO_OUTPUT_INACTIVE);
+    }
+    if (device_is_ready(can1_rx_tp.port)) {
+        gpio_pin_configure_dt(&can1_rx_tp, GPIO_OUTPUT_INACTIVE);
+    }
+
     for (int i = 0; i < DEDUP_COUNT; i++) {
         last_seq[i] = 0xFF;   /* "never seen" sentinel */
         last_rx_time[i] = 0;

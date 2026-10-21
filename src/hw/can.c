@@ -1,15 +1,27 @@
 #include "hw/can.h"
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/can.h>
+#include <zephyr/drivers/gpio.h>
 #include <string.h>
 #include "core/log.h"
 
 const struct device *can_a_dev = DEVICE_DT_GET(DT_ALIAS(can_a));
 const struct device *can_b_dev = DEVICE_DT_GET(DT_ALIAS(can_b));
 
+static const struct gpio_dt_spec can0_tx_tp = GPIO_DT_SPEC_GET(DT_ALIAS(can0_tx), gpios);
+static const struct gpio_dt_spec can1_tx_tp = GPIO_DT_SPEC_GET(DT_ALIAS(can1_tx), gpios);
+
 int can_bus_init(void)
 {
     int ret;
+
+    /* Initialize TX test point GPIOs */
+    if (device_is_ready(can0_tx_tp.port)) {
+        gpio_pin_configure_dt(&can0_tx_tp, GPIO_OUTPUT_INACTIVE);
+    }
+    if (device_is_ready(can1_tx_tp.port)) {
+        gpio_pin_configure_dt(&can1_tx_tp, GPIO_OUTPUT_INACTIVE);
+    }
 
     if (!device_is_ready(can_a_dev)) {
         DEBUG_PRINT("Error: CAN A device not ready\n");
@@ -50,6 +62,15 @@ void can_log_state(void)
                 state_b, err_b.tx_err_cnt, err_b.rx_err_cnt);
 }
 
+int can_send_bus(const struct device *dev, struct can_frame *frame, k_timeout_t timeout)
+{
+    const struct gpio_dt_spec *tx_tp = (dev == can_a_dev) ? &can0_tx_tp : &can1_tx_tp;
+    gpio_pin_set_dt(tx_tp, 1);
+    int ret = can_send(dev, frame, timeout, NULL, NULL);
+    gpio_pin_set_dt(tx_tp, 0);
+    return ret;
+}
+
 int can_send_both(uint32_t id, uint8_t dlc, const uint8_t *data)
 {
     struct can_frame f = {
@@ -58,8 +79,8 @@ int can_send_both(uint32_t id, uint8_t dlc, const uint8_t *data)
     };
     memcpy(f.data, data, dlc);
 
-    int ra = can_send(can_a_dev, &f, K_MSEC(5), NULL, NULL);
-    int rb = can_send(can_b_dev, &f, K_MSEC(5), NULL, NULL);
+    int ra = can_send_bus(can_a_dev, &f, K_MSEC(5));
+    int rb = can_send_bus(can_b_dev, &f, K_MSEC(5));
 
     return (ra == 0 && rb == 0) ? 0 : -EIO;
 }

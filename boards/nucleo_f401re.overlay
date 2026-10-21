@@ -1,0 +1,102 @@
+/ {
+    aliases {
+        // Turn Signal LEDs
+        led-right = &led_right;
+        led-left = &led_left;
+
+        // Steering Servo
+        pwm-servo = &pwm_servo;
+    };
+
+    servo_pwm {
+        compatible = "pwm-leds";
+        pwm_servo: pwm_servo {
+            pwms = <&pwm4 1 20000000 PWM_POLARITY_NORMAL>; 
+        };
+    };
+
+    leds {
+        compatible = "gpio-leds";
+
+        led_right: right {
+            gpios = <&gpiob 5 GPIO_ACTIVE_HIGH>;
+            label = "Rear Right Turn Signal";
+        };
+
+        led_left: left {
+            gpios = <&gpiob 4 GPIO_ACTIVE_HIGH>;
+            label = "Rear Left Turn Signal";
+        };
+    };
+};
+
+// ============================================================
+// CAN0 (MCP2515 on SPI2)
+//   MISO -> PC2, MOSI -> PC3, SCLK -> PB10
+//   CS   -> PB2, INT  -> PB1 (falling edge, internal pull-up)
+// ============================================================
+&spi2 {
+    status = "okay";
+    pinctrl-0 = <&spi2_sck_pb10 &spi2_miso_pc2 &spi2_mosi_pc3>;
+    pinctrl-names = "default";
+    cs-gpios = <&gpiob 2 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+
+    can0: mcp2515@0 {
+        compatible = "microchip,mcp2515";
+        reg = <0>;
+        spi-max-frequency = <8000000>;
+        osc-freq = <16000000>;
+        int-gpios = <&gpiob 1 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+        bitrate = <500000>;
+        status = "okay";
+    };
+};
+
+// ============================================================
+// CAN1 (MCP2515 on SPI3)
+//   MISO -> PC11, MOSI -> PC12, SCLK -> PC10
+//   CS   -> PD2,  INT  -> PA11 (falling edge, internal pull-up)
+// ============================================================
+&spi3 {
+    status = "okay";
+    pinctrl-0 = <&spi3_sck_pc10 &spi3_miso_pc11 &spi3_mosi_pc12>;
+    pinctrl-names = "default";
+    cs-gpios = <&gpiod 2 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+
+    can1: mcp2515@0 {
+        compatible = "microchip,mcp2515";
+        reg = <0>;
+        spi-max-frequency = <8000000>;
+        osc-freq = <16000000>;
+        int-gpios = <&gpioa 11 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+        bitrate = <500000>;
+        status = "okay";
+    };
+};
+
+// Aliases for CAN bus interfaces
+/ {
+    aliases {
+        can-a = &can0;
+        can-b = &can1;
+    };
+};
+
+// Steering PWM Timer
+&timers4 {
+    status = "okay";
+    st,prescaler = <83>;
+    
+    pwm4: pwm {
+        status = "okay";
+        pinctrl-0 = <&tim4_ch1_pb6>;
+        pinctrl-names = "default";
+    };
+};
+
+// Current Sensor ADC
+&adc1 {
+    status = "okay";
+    pinctrl-0 = <&adc1_in8_pb0>;
+    pinctrl-names = "default";
+};

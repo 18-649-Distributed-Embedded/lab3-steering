@@ -1,0 +1,53 @@
+#include "hw/can.h"
+#include <zephyr/kernel.h>
+#include <zephyr/drivers/can.h>
+#include "core/log.h"
+
+const struct device *can_a_dev = DEVICE_DT_GET(DT_ALIAS(can_a));
+const struct device *can_b_dev = DEVICE_DT_GET(DT_ALIAS(can_b));
+
+int can_bus_init(void)
+{
+    int ret;
+
+    /* --- CAN A (SPI2 / MCP2515) --- */
+    if (!device_is_ready(can_a_dev)) {
+        DEBUG_PRINT("Error: CAN A (can0) device not ready\n");
+        return -ENODEV;
+    }
+    ret = can_start(can_a_dev);
+    if (ret != 0 && ret != -EALREADY) {
+        DEBUG_PRINT("Error: CAN A start failed (%d)\n", ret);
+        return ret;
+    }
+    DEBUG_PRINT("CAN A initialized and started\n");
+
+    /* --- CAN B (SPI3 / MCP2515) --- */
+    if (!device_is_ready(can_b_dev)) {
+        DEBUG_PRINT("Error: CAN B (can1) device not ready\n");
+        return -ENODEV;
+    }
+    ret = can_start(can_b_dev);
+    if (ret != 0 && ret != -EALREADY) {
+        DEBUG_PRINT("Error: CAN B start failed (%d)\n", ret);
+        return ret;
+    }
+    DEBUG_PRINT("CAN B initialized and started\n");
+
+    return 0;
+}
+
+void can_log_state(void)
+{
+    enum can_state state_a, state_b;
+    struct can_bus_err_cnt err_a, err_b;
+
+    can_get_state(can_a_dev, &state_a, &err_a);
+    can_get_state(can_b_dev, &state_b, &err_b);
+
+    DEBUG_PRINT("CAN A state=%d (TEC=%u REC=%u)\n",
+                state_a, err_a.tx_err_cnt, err_a.rx_err_cnt);
+    DEBUG_PRINT("CAN B state=%d (TEC=%u REC=%u)\n",
+                state_b, err_b.tx_err_cnt, err_b.rx_err_cnt);
+}
+

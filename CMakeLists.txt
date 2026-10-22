@@ -16,8 +16,10 @@ target_sources(app PRIVATE
     src/sys/steering.c
     src/sys/blinkers_control.c
     src/sys/hb_tx.c
+    src/sys/force_tx.c
     src/sys/hb_mon.c
     src/sys/health.c
+    src/sys/debug_status.c
 )
 
 

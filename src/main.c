@@ -7,13 +7,15 @@
 #include "sys/steering.h"
 #include "sys/blinkers_control.h"
 #include "sys/hb_tx.h"
+#include "sys/force_tx.h"
 #include "sys/hb_mon.h"
 #include "sys/health.h"
+#include "sys/debug_status.h"
 #include "core/log.h"
 
 int main(void)
 {
-    DEBUG_PRINT("=== Lab 3 N3 (Drivetrain): Initializing ===\n");
+    DEBUG_PRINT("=== Lab 3 N2 (Steering): Initializing ===\n");
 
     /* ── Hardware layer ──────────────────────────────────── */
     DEBUG_PRINT("[HW] Initializing...\n");
@@ -29,10 +31,12 @@ int main(void)
 
     can_rx_init();           /* prio 2 (MCP2515 driver thread) — RX dispatch  */
     health_init();           /* prio 3 — TEST_BTN + watchdog                  */
-    steering_init();            /* prio 3 — DRIVE (throttle/brake on CTRL)        */
-    blinkers_control_init(); /* prio 4 — BLINK_R (rear LEDs on BLINK)          */
-    hb_tx_init();            /* prio 5 — HB_TX (0x102 every 20ms)              */
+    steering_init();         /* prio 3 — STEER (servo PWM on CTRL)             */
+    blinkers_control_init(); /* prio 4 — BLINK_F (front LEDs on BLINK)         */
+    hb_tx_init();            /* prio 5 — HB_TX (0x101 every 20ms)              */
+    force_tx_init();         /* prio 5 — FORCE_TX (0x300 every 50ms, dummy)    */
     hb_mon_init();           /* prio 6 — HB_MON + DEG_A/B LEDs (every 20ms)   */
+    debug_status_init();     /* prio 10 — STAT line per heartbeat (debug)     */
 
     DEBUG_PRINT("=== Initialization complete. Zephyr scheduler active. ===\n");
 

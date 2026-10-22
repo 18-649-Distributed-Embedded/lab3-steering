@@ -45,17 +45,17 @@ static void hb_mon_thread_func(void *p1, void *p2, void *p3)
 
         bool n1_miss_a = peer_missing(&mailbox_hb_n1_a);
         bool n1_miss_b = peer_missing(&mailbox_hb_n1_b);
-        bool n2_miss_a = peer_missing(&mailbox_hb_n2_a);
-        bool n2_miss_b = peer_missing(&mailbox_hb_n2_b);
+        bool n3_miss_a = peer_missing(&mailbox_hb_n3_a);
+        bool n3_miss_b = peer_missing(&mailbox_hb_n3_b);
 
         /* DEG_A: any peer missing on bus A */
-        bool deg_a_on = n1_miss_a || n2_miss_a;
+        bool deg_a_on = n1_miss_a || n3_miss_a;
         /* DEG_B: any peer missing on bus B */
-        bool deg_b_on = n1_miss_b || n2_miss_b;
+        bool deg_b_on = n1_miss_b || n3_miss_b;
 
         /* ZONE_FAIL: peer missing on BOTH buses */
         bool zone_fail_n1 = n1_miss_a && n1_miss_b;
-        bool zone_fail_n2 = n2_miss_a && n2_miss_b;
+        bool zone_fail_n3 = n3_miss_a && n3_miss_b;
 
         /* Update bus health flags */
         if (deg_a_on) {
@@ -75,19 +75,19 @@ static void hb_mon_thread_func(void *p1, void *p2, void *p3)
         } else {
             atomic_clear_bit(&system_safety_flags, SAFETY_FLAG_ZONE_FAIL_N1);
         }
-        if (zone_fail_n2) {
-            atomic_set_bit(&system_safety_flags, SAFETY_FLAG_ZONE_FAIL_N2);
+        if (zone_fail_n3) {
+            atomic_set_bit(&system_safety_flags, SAFETY_FLAG_ZONE_FAIL_N3);
         } else {
-            atomic_clear_bit(&system_safety_flags, SAFETY_FLAG_ZONE_FAIL_N2);
+            atomic_clear_bit(&system_safety_flags, SAFETY_FLAG_ZONE_FAIL_N3);
         }
 
         /* Check peer reported states */
         uint8_t n1_state = (uint8_t)atomic_get(&mailbox_n1_state);
-        uint8_t n2_state = (uint8_t)atomic_get(&mailbox_n2_state);
-        if (n1_state == CAN_ZONE_STATE_FAULT || n2_state == CAN_ZONE_STATE_FAULT) {
+        uint8_t n3_state = (uint8_t)atomic_get(&mailbox_n3_state);
+        if (n1_state == CAN_ZONE_STATE_FAULT || n3_state == CAN_ZONE_STATE_FAULT) {
             atomic_set_bit(&system_safety_flags, SAFETY_FLAG_PEER_FAULT);
-        } else if (!zone_fail_n1 && !zone_fail_n2 &&
-                   n1_state == CAN_ZONE_STATE_OK && n2_state == CAN_ZONE_STATE_OK) {
+        } else if (!zone_fail_n1 && !zone_fail_n3 &&
+                   n1_state == CAN_ZONE_STATE_OK && n3_state == CAN_ZONE_STATE_OK) {
             /* If peers are alive and reporting OK, clear peer fault */
             atomic_clear_bit(&system_safety_flags, SAFETY_FLAG_PEER_FAULT);
         }

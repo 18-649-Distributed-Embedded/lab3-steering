@@ -1,9 +1,11 @@
 #include "hw/servo.h"
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/pwm.h>
+#include <zephyr/sys/atomic.h>
 #include "core/log.h"
 
 static const struct pwm_dt_spec pwm_servo = PWM_DT_SPEC_GET(DT_ALIAS(pwm_servo));
+static atomic_t current_pulse_ns = ATOMIC_INIT(SERVO_CENTER_PULSE_NS);
 
 int servo_init(void)
 {
@@ -13,6 +15,7 @@ int servo_init(void)
     }
     // Center it initially
     pwm_set_pulse_dt(&pwm_servo, SERVO_CENTER_PULSE_NS);
+    atomic_set(&current_pulse_ns, SERVO_CENTER_PULSE_NS);
     return 0;
 }
 
@@ -25,4 +28,10 @@ void servo_set_pulse_ns(uint32_t pulse_ns)
         pulse_ns = SERVO_MAX_PULSE_NS;
     }
     pwm_set_pulse_dt(&pwm_servo, pulse_ns);
+    atomic_set(&current_pulse_ns, (atomic_val_t)pulse_ns);
+}
+
+uint32_t servo_get_pulse_ns(void)
+{
+    return (uint32_t)atomic_get(&current_pulse_ns);
 }

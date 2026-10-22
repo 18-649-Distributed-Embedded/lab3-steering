@@ -1,0 +1,671 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index bc10523..c1f4b14 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -16,6 +16,7 @@ target_sources(app PRIVATE
+     src/sys/steering.c
+     src/sys/blinkers_control.c
+     src/sys/hb_tx.c
++    src/sys/force_tx.c
+     src/sys/hb_mon.c
+     src/sys/health.c
+ )
+diff --git a/boards/nucleo_f401re.overlay b/boards/nucleo_f401re.overlay
+index 8d354df..e7cf7a0 100644
+--- a/boards/nucleo_f401re.overlay
++++ b/boards/nucleo_f401re.overlay
+@@ -20,12 +20,12 @@
+ 
+         led_right: right {
+             gpios = <&gpiob 5 GPIO_ACTIVE_HIGH>;
+-            label = "Rear Right Turn Signal";
++            label = "Front Right Turn Signal (FR)";
+         };
+ 
+         led_left: left {
+             gpios = <&gpiob 4 GPIO_ACTIVE_HIGH>;
+-            label = "Rear Left Turn Signal";
++            label = "Front Left Turn Signal (FL)";
+         };
+     };
+ };
+@@ -138,3 +138,13 @@
+         can1-tx = &can1_tx_tp;
+     };
+ };
++// PB6 is used by TIM4_CH1 (servo). The board DTS also assigns PB6 to
++// USART1 TX and SPI1 CS. Neither is used here (console = USART2,
++// CAN = SPI2/SPI3), so disable them to avoid a pin conflict.
++&usart1 {
++    status = "disabled";
++};
++
++&spi1 {
++    status = "disabled";
++};
+diff --git a/src/core/cmd.h b/src/core/cmd.h
+index 99decaf..a5d1803 100644
+--- a/src/core/cmd.h
++++ b/src/core/cmd.h
+@@ -6,12 +6,23 @@
+ 
+ #include <zephyr/sys/atomic.h>
+ 
+-// Safety Interlock Bitmask Flags
+-#define SAFETY_FLAG_WATCHDOG_TIMEOUT 0
+-#define SAFETY_FLAG_ESTOP            1
++// Safety Interlock Bitmask Flags (bit numbers for atomic_*_bit)
++// Any bit set in system_safety_flags = this node is in the error state.
++#define SAFETY_FLAG_WATCHDOG_TIMEOUT 0   // no valid CTRL for > 150ms (also set at power-up)
++#define SAFETY_FLAG_ESTOP            1   // reserved (unused on N2)
++#define SAFETY_FLAG_ZONE_FAIL_SELF   2   // this zone failed (test button)
++#define SAFETY_FLAG_PEER_FAULT       3   // a peer reported FAULT (FAULT msg or HB state)
++#define SAFETY_FLAG_ZONE_FAIL_N1     4   // N1 heartbeat missing on BOTH buses
++#define SAFETY_FLAG_ZONE_FAIL_N3     5   // N3 heartbeat missing on BOTH buses
+ 
+ extern atomic_t system_safety_flags;
+ 
++// Bus health flags (bit numbers) - drive DEG_A / DEG_B LEDs (R4.7)
++#define BUS_FLAG_DEG_A 0
++#define BUS_FLAG_DEG_B 1
++
++extern atomic_t bus_health_flags;
++
+ // Blinker state flags
+ #define BLINKER_OFF    0x00
+ #define BLINKER_LEFT   0x01
+diff --git a/src/hw/can.c b/src/hw/can.c
+index 2781042..d9bbbea 100644
+--- a/src/hw/can.c
++++ b/src/hw/can.c
+@@ -4,13 +4,36 @@
+ #include <zephyr/drivers/gpio.h>
+ #include <string.h>
+ #include "core/log.h"
++#include "core/cmd.h"
++#include "core/can_catalog.h"
+ 
+ const struct device *can_a_dev = DEVICE_DT_GET(DT_ALIAS(can_a));
+ const struct device *can_b_dev = DEVICE_DT_GET(DT_ALIAS(can_b));
+ 
++atomic_t can_unack_streak_a = ATOMIC_INIT(0), can_unack_streak_b = ATOMIC_INIT(0);
++
+ static const struct gpio_dt_spec can0_tx_tp = GPIO_DT_SPEC_GET(DT_ALIAS(can0_tx), gpios);
+ static const struct gpio_dt_spec can1_tx_tp = GPIO_DT_SPEC_GET(DT_ALIAS(can1_tx), gpios);
+ 
++/* Bring up one controller. */
++static int start_one(const struct device *dev, const char *name)
++{
++    int ret;
++
++    if (!device_is_ready(dev)) {
++        DEBUG_PRINT("Error: CAN %s device not ready (check SPI wiring, CS/INT pins, 3V3)\n", name);
++        return -ENODEV;
++    }
++
++    ret = can_start(dev);
++    if (ret != 0 && ret != -EALREADY) {
++        DEBUG_PRINT("Error: CAN %s start failed (%d)\n", name, ret);
++        return ret;
++    }
++    DEBUG_PRINT("CAN %s initialized and started\n", name);
++    return 0;
++}
++
+ int can_bus_init(void)
+ {
+     int ret;
+@@ -23,28 +46,14 @@ int can_bus_init(void)
+         gpio_pin_configure_dt(&can1_tx_tp, GPIO_OUTPUT_INACTIVE);
+     }
+ 
+-    if (!device_is_ready(can_a_dev)) {
+-        DEBUG_PRINT("Error: CAN A device not ready\n");
+-        return -ENODEV;
+-    }
+-    ret = can_start(can_a_dev);
+-    if (ret != 0 && ret != -EALREADY) {
+-        DEBUG_PRINT("Error: CAN A start failed (%d)\n", ret);
++    ret = start_one(can_a_dev, "A");
++    if (ret != 0) {
+         return ret;
+     }
+-    DEBUG_PRINT("CAN A initialized and started\n");
+-
+-    if (!device_is_ready(can_b_dev)) {
+-        DEBUG_PRINT("Error: CAN B device not ready\n");
+-        return -ENODEV;
+-    }
+-    ret = can_start(can_b_dev);
+-    if (ret != 0 && ret != -EALREADY) {
+-        DEBUG_PRINT("Error: CAN B start failed (%d)\n", ret);
++    ret = start_one(can_b_dev, "B");
++    if (ret != 0) {
+         return ret;
+     }
+-    DEBUG_PRINT("CAN B initialized and started\n");
+-
+     return 0;
+ }
+ 
+@@ -62,25 +71,57 @@ void can_log_state(void)
+                 state_b, err_b.tx_err_cnt, err_b.rx_err_cnt);
+ }
+ 
+-int can_send_bus(const struct device *dev, struct can_frame *frame, k_timeout_t timeout)
++/* TX completion callback. Runs in the MCP2515 driver thread when the frame
++ * has been ACKed on the bus (error == 0) or failed (error != 0).
++ * Keep it short. user_data: 0 = bus A, 1 = bus B. */
++static void tx_done_cb(const struct device *dev, int error, void *user_data)
+ {
+-    const struct gpio_dt_spec *tx_tp = (dev == can_a_dev) ? &can0_tx_tp : &can1_tx_tp;
++    atomic_t *streak = ((uintptr_t)user_data == 0) ? &can_unack_streak_a
++                                                   : &can_unack_streak_b;
++    if (error == 0) {
++        atomic_set(streak, 0);
++    } else {
++        atomic_inc(streak);
++    }
++}
++
++int can_send_bus(const struct device *dev, struct can_frame *frame)
++{
++    bool is_a = (dev == can_a_dev);
++    const struct gpio_dt_spec *tx_tp = is_a ? &can0_tx_tp : &can1_tx_tp;
++
++    /* Non-blocking: K_NO_WAIT for a free TX buffer, completion via callback.
++     * The frame is copied into the controller during this call. */
+     gpio_pin_set_dt(tx_tp, 1);
+-    int ret = can_send(dev, frame, timeout, NULL, NULL);
++    int ret = can_send(dev, frame, K_NO_WAIT, tx_done_cb,
++                       (void *)(uintptr_t)(is_a ? 0 : 1));
+     gpio_pin_set_dt(tx_tp, 0);
++
++    if (ret != 0) {
++        /* Buffers still full: this bus is not draining. Drop this copy. */
++        atomic_inc(is_a ? &can_unack_streak_a : &can_unack_streak_b);
++    }
+     return ret;
+ }
+ 
+ int can_send_both(uint32_t id, uint8_t dlc, const uint8_t *data)
+ {
++    /* Test-button fault injection (R4.5, S5): a failed zone stops
++     * transmitting. FAULT is still allowed so peers learn why. */
++    if (atomic_test_bit(&system_safety_flags, SAFETY_FLAG_ZONE_FAIL_SELF) &&
++        id != CAN_ID_FAULT) {
++        return -ECANCELED;
++    }
++
+     struct can_frame f = {
+         .id  = id,
+         .dlc = dlc,
+     };
+     memcpy(f.data, data, dlc);
+ 
+-    int ra = can_send_bus(can_a_dev, &f, K_MSEC(5));
+-    int rb = can_send_bus(can_b_dev, &f, K_MSEC(5));
++    /* Independent: A failing never delays B, and vice versa. */
++    int ra = can_send_bus(can_a_dev, &f);
++    int rb = can_send_bus(can_b_dev, &f);
+ 
+-    return (ra == 0 && rb == 0) ? 0 : -EIO;
++    return (ra == 0 || rb == 0) ? 0 : -EIO;
+ }
+diff --git a/src/hw/can.h b/src/hw/can.h
+index 2246d75..60c9bf0 100644
+--- a/src/hw/can.h
++++ b/src/hw/can.h
+@@ -2,12 +2,18 @@
+ #define HW_CAN_H
+ 
+ #include <zephyr/drivers/can.h>
++#include <zephyr/sys/atomic.h>
+ #include <stdint.h>
+ 
+ /* Opaque handles for both MCP2515 controllers */
+ extern const struct device *can_a_dev;   /* CAN0: SPI2 */
+ extern const struct device *can_b_dev;   /* CAN1: SPI3 */
+ 
++/* Per-bus un-ACKed streak: consecutive frames on that bus that were NOT
++ * delivered (TX buffers full or send error). Reset to 0 the moment any
++ * frame on that bus is ACKed. */
++extern atomic_t can_unack_streak_a, can_unack_streak_b;
++
+ /**
+  * @brief Initialize and start both MCP2515 CAN controllers.
+  * @return 0 on success, negative errno on failure.
+@@ -20,16 +26,23 @@ int can_bus_init(void);
+ void can_log_state(void);
+ 
+ /**
+- * @brief Transmit a frame on a specific CAN bus with TX GPIO test point pulsing.
++ * @brief Queue a frame on one controller WITHOUT waiting (non-blocking).
++ *        Returns immediately; the ACK result arrives later in a callback.
++ *        Pulses that bus's CAN_TX test point around the queue call.
++ * @return 0 if queued, -EAGAIN if that controller's TX buffers are full.
+  */
+-int can_send_bus(const struct device *dev, struct can_frame *frame, k_timeout_t timeout);
++int can_send_bus(const struct device *dev, struct can_frame *frame);
+ 
+ /**
+- * @brief Transmit an identical frame on BOTH CAN buses.
++ * @brief Queue an identical frame on BOTH buses, independently.
++ *        A dead/un-ACKed bus never delays or blocks the other bus.
++ *        While this zone is self-failed (test button, R4.5 / S5) nothing is
++ *        sent except FAULT frames: a failed zone goes silent.
+  * @param id   11-bit CAN standard frame ID
+  * @param dlc  Data length (0-8)
+  * @param data Payload bytes
+- * @return 0 if both sends succeed, -EIO if either fails
++ * @return 0 if queued on at least one bus, -EIO if neither,
++ *         -ECANCELED if suppressed because this zone is self-failed
+  */
+ int can_send_both(uint32_t id, uint8_t dlc, const uint8_t *data);
+ 
+diff --git a/src/main.c b/src/main.c
+index df6ac86..dd05330 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -7,13 +7,14 @@
+ #include "sys/steering.h"
+ #include "sys/blinkers_control.h"
+ #include "sys/hb_tx.h"
++#include "sys/force_tx.h"
+ #include "sys/hb_mon.h"
+ #include "sys/health.h"
+ #include "core/log.h"
+ 
+ int main(void)
+ {
+-    DEBUG_PRINT("=== Lab 3 N3 (Drivetrain): Initializing ===\n");
++    DEBUG_PRINT("=== Lab 3 N2 (Steering): Initializing ===\n");
+ 
+     /* ── Hardware layer ──────────────────────────────────── */
+     DEBUG_PRINT("[HW] Initializing...\n");
+@@ -29,9 +30,10 @@ int main(void)
+ 
+     can_rx_init();           /* prio 2 (MCP2515 driver thread) — RX dispatch  */
+     health_init();           /* prio 3 — TEST_BTN + watchdog                  */
+-    steering_init();            /* prio 3 — DRIVE (throttle/brake on CTRL)        */
+-    blinkers_control_init(); /* prio 4 — BLINK_R (rear LEDs on BLINK)          */
+-    hb_tx_init();            /* prio 5 — HB_TX (0x102 every 20ms)              */
++    steering_init();         /* prio 3 — STEER (servo on CTRL) [TODO]          */
++    blinkers_control_init(); /* prio 4 — BLINK_F (front LEDs on BLINK)         */
++    hb_tx_init();            /* prio 5 — HB_TX (0x101 every 20ms)              */
++    force_tx_init();         /* prio 5 — FORCE_TX (0x300 every 50ms, dummy)    */
+     hb_mon_init();           /* prio 6 — HB_MON + DEG_A/B LEDs (every 20ms)   */
+ 
+     DEBUG_PRINT("=== Initialization complete. Zephyr scheduler active. ===\n");
+diff --git a/src/sys/blinkers_control.c b/src/sys/blinkers_control.c
+index 2ebe657..f90496c 100644
+--- a/src/sys/blinkers_control.c
++++ b/src/sys/blinkers_control.c
+@@ -6,10 +6,10 @@
+ #include "core/cmd.h"
+ #include "hw/blinkers.h"
+ 
+-#define BLINK_R_THREAD_STACK  512
+-#define BLINK_R_THREAD_PRIO   4
++#define BLINK_F_THREAD_STACK  512
++#define BLINK_F_THREAD_PRIO   4
+ 
+-static void blink_r_thread_func(void *p1, void *p2, void *p3)
++static void blink_f_thread_func(void *p1, void *p2, void *p3)
+ {
+     while (1) {
+         /*
+@@ -55,18 +55,18 @@ static void blink_r_thread_func(void *p1, void *p2, void *p3)
+     }
+ }
+ 
+-K_THREAD_STACK_DEFINE(blink_r_stack, BLINK_R_THREAD_STACK);
+-static struct k_thread blink_r_thread_data;
++K_THREAD_STACK_DEFINE(blink_f_stack, BLINK_F_THREAD_STACK);
++static struct k_thread blink_f_thread_data;
+ 
+ void blinkers_control_init(void)
+ {
+     blinkers_set_left(false);
+     blinkers_set_right(false);
+ 
+-    k_thread_create(&blink_r_thread_data, blink_r_stack,
+-                    K_THREAD_STACK_SIZEOF(blink_r_stack),
+-                    blink_r_thread_func,
++    k_thread_create(&blink_f_thread_data, blink_f_stack,
++                    K_THREAD_STACK_SIZEOF(blink_f_stack),
++                    blink_f_thread_func,
+                     NULL, NULL, NULL,
+-                    BLINK_R_THREAD_PRIO, 0, K_NO_WAIT);
+-    k_thread_name_set(&blink_r_thread_data, "BLINK_R");
++                    BLINK_F_THREAD_PRIO, 0, K_NO_WAIT);
++    k_thread_name_set(&blink_f_thread_data, "BLINK_F");
+ }
+diff --git a/src/sys/blinkers_control.h b/src/sys/blinkers_control.h
+index 16ec8e8..11bf55b 100644
+--- a/src/sys/blinkers_control.h
++++ b/src/sys/blinkers_control.h
+@@ -2,7 +2,7 @@
+ #define SYS_BLINKERS_CONTROL_H
+ 
+ /**
+- * @brief Start the BLINK_R task: drives rear LEDs from BLINK (0x200) messages.
++ * @brief Start the BLINK_F task: drives front LEDs (FL/FR) from BLINK (0x200) messages.
+  */
+ void blinkers_control_init(void);
+ 
+diff --git a/src/sys/can_rx.c b/src/sys/can_rx.c
+index 1faad5f..2502749 100644
+--- a/src/sys/can_rx.c
++++ b/src/sys/can_rx.c
+@@ -3,6 +3,7 @@
+ #include <zephyr/drivers/can.h>
+ #include <zephyr/drivers/gpio.h>
+ #include <zephyr/sys/atomic.h>
++#include <zephyr/sys/byteorder.h>
+ #include "hw/can.h"
+ #include "core/can_catalog.h"
+ #include "core/cmd.h"
+@@ -15,14 +16,14 @@ static const struct gpio_dt_spec can1_rx_tp = GPIO_DT_SPEC_GET(DT_ALIAS(can1_rx)
+ K_SEM_DEFINE(sem_ctrl,  0, 1);
+ K_SEM_DEFINE(sem_blink, 0, 1);
+ 
+-atomic_t mailbox_ctrl     = ATOMIC_INIT(127 << 8);  /* throttle=127, brake=0 */
++atomic_t mailbox_ctrl     = ATOMIC_INIT(0);         /* steer=0 (center), buttons=0 */
+ atomic_t mailbox_blinker  = ATOMIC_INIT(0);
+ atomic_t mailbox_hb_n1_a  = ATOMIC_INIT(0);
+ atomic_t mailbox_hb_n1_b  = ATOMIC_INIT(0);
+-atomic_t mailbox_hb_n2_a  = ATOMIC_INIT(0);
+-atomic_t mailbox_hb_n2_b  = ATOMIC_INIT(0);
++atomic_t mailbox_hb_n3_a  = ATOMIC_INIT(0);
++atomic_t mailbox_hb_n3_b  = ATOMIC_INIT(0);
+ atomic_t mailbox_n1_state = ATOMIC_INIT(CAN_ZONE_STATE_OK);
+-atomic_t mailbox_n2_state = ATOMIC_INIT(CAN_ZONE_STATE_OK);
++atomic_t mailbox_n3_state = ATOMIC_INIT(CAN_ZONE_STATE_OK);
+ 
+ volatile uint32_t last_ctrl_time = 0;
+ 
+@@ -30,7 +31,7 @@ volatile uint32_t last_ctrl_time = 0;
+ #define DEDUP_CTRL    0
+ #define DEDUP_FAULT   1
+ #define DEDUP_HB_N1   2
+-#define DEDUP_HB_N2   3
++#define DEDUP_HB_N3   3
+ #define DEDUP_BLINK   4
+ #define DEDUP_COUNT   5
+ 
+@@ -43,7 +44,7 @@ static int id_to_dedup_idx(uint32_t id)
+     case CAN_ID_CTRL:   return DEDUP_CTRL;
+     case CAN_ID_FAULT:  return DEDUP_FAULT;
+     case CAN_ID_HB_N1:  return DEDUP_HB_N1;
+-    case CAN_ID_HB_N2:  return DEDUP_HB_N2;
++    case CAN_ID_HB_N3:  return DEDUP_HB_N3;
+     case CAN_ID_BLINK:  return DEDUP_BLINK;
+     default:            return -1;
+     }
+@@ -93,9 +94,9 @@ static void rx_dispatch(const struct device *dev,
+     if (frame->id == CAN_ID_HB_N1) {
+         if (bus == 0) atomic_set(&mailbox_hb_n1_a, (atomic_val_t)now);
+         else          atomic_set(&mailbox_hb_n1_b, (atomic_val_t)now);
+-    } else if (frame->id == CAN_ID_HB_N2) {
+-        if (bus == 0) atomic_set(&mailbox_hb_n2_a, (atomic_val_t)now);
+-        else          atomic_set(&mailbox_hb_n2_b, (atomic_val_t)now);
++    } else if (frame->id == CAN_ID_HB_N3) {
++        if (bus == 0) atomic_set(&mailbox_hb_n3_a, (atomic_val_t)now);
++        else          atomic_set(&mailbox_hb_n3_b, (atomic_val_t)now);
+     }
+ 
+     uint8_t seq = can_seq(frame->data[0]);
+@@ -103,12 +104,14 @@ static void rx_dispatch(const struct device *dev,
+         switch (frame->id) {
+ 
+         case CAN_ID_CTRL: {
+-            uint8_t throttle = frame->data[3];
+-            uint8_t brake    = frame->data[4];
+-            uint8_t buttons  = frame->data[5];
+-            uint32_t val = ((uint32_t)buttons  << 16) |
+-                           ((uint32_t)throttle <<  8) |
+-                           ((uint32_t)brake);
++            /* CTRL payload: [0]=flags|seq [1..2]=steer int16 [3]=throttle
++             * [4]=brake [5]=buttons [6]=CRC-8 [7]=unused
++             * TODO(team): confirm steer byte order with N1. Assumed little-endian.
++             * TODO: CRC-8 + range check -> FAULT (R3, checkoff item 10). */
++            int16_t steer   = (int16_t)sys_get_le16(&frame->data[1]);
++            uint8_t buttons = frame->data[5];
++            uint32_t val = ((uint32_t)buttons << 16) |
++                           (uint32_t)(uint16_t)steer;
+             atomic_set(&mailbox_ctrl, (atomic_val_t)val);
+             last_ctrl_time = now;
+             k_sem_give(&sem_ctrl);
+@@ -135,9 +138,9 @@ static void rx_dispatch(const struct device *dev,
+             break;
+         }
+ 
+-        case CAN_ID_HB_N2: {
++        case CAN_ID_HB_N3: {
+             uint8_t zone_state = frame->data[1];
+-            atomic_set(&mailbox_n2_state, (atomic_val_t)zone_state);
++            atomic_set(&mailbox_n3_state, (atomic_val_t)zone_state);
+             break;
+         }
+ 
+diff --git a/src/sys/can_rx.h b/src/sys/can_rx.h
+index 87f34b1..677591e 100644
+--- a/src/sys/can_rx.h
++++ b/src/sys/can_rx.h
+@@ -16,7 +16,7 @@ extern struct k_sem sem_blink;   /* given on BLINK (0x200) */
+ /*
+  * Mailboxes (atomic_t, latest-value, non-blocking read)
+  *
+- * mailbox_ctrl:    [buttons:8][throttle:8][brake:8]
++ * mailbox_ctrl:    [0:8][buttons:8][steer int16:16]
+  * mailbox_blinker: [0:16][blink_state:8][phase_bit:8]
+  *
+  * HB timestamps: k_uptime_get_32() value at last valid HB reception.
+@@ -27,11 +27,11 @@ extern atomic_t mailbox_blinker;
+ 
+ extern atomic_t mailbox_hb_n1_a;   /* last HB_N1 on bus A */
+ extern atomic_t mailbox_hb_n1_b;   /* last HB_N1 on bus B */
+-extern atomic_t mailbox_hb_n2_a;   /* last HB_N2 on bus A */
+-extern atomic_t mailbox_hb_n2_b;   /* last HB_N2 on bus B */
++extern atomic_t mailbox_hb_n3_a;   /* last HB_N3 on bus A */
++extern atomic_t mailbox_hb_n3_b;   /* last HB_N3 on bus B */
+ 
+ extern atomic_t mailbox_n1_state;  /* last known zone state of N1 */
+-extern atomic_t mailbox_n2_state;  /* last known zone state of N2 */
++extern atomic_t mailbox_n3_state;  /* last known zone state of N3 */
+ 
+ /* Watchdog: last valid CTRL reception time */
+ extern volatile uint32_t last_ctrl_time;
+diff --git a/src/sys/hb_mon.c b/src/sys/hb_mon.c
+index 3137120..e8882ad 100644
+--- a/src/sys/hb_mon.c
++++ b/src/sys/hb_mon.c
+@@ -45,17 +45,17 @@ static void hb_mon_thread_func(void *p1, void *p2, void *p3)
+ 
+         bool n1_miss_a = peer_missing(&mailbox_hb_n1_a);
+         bool n1_miss_b = peer_missing(&mailbox_hb_n1_b);
+-        bool n2_miss_a = peer_missing(&mailbox_hb_n2_a);
+-        bool n2_miss_b = peer_missing(&mailbox_hb_n2_b);
++        bool n3_miss_a = peer_missing(&mailbox_hb_n3_a);
++        bool n3_miss_b = peer_missing(&mailbox_hb_n3_b);
+ 
+         /* DEG_A: any peer missing on bus A */
+-        bool deg_a_on = n1_miss_a || n2_miss_a;
++        bool deg_a_on = n1_miss_a || n3_miss_a;
+         /* DEG_B: any peer missing on bus B */
+-        bool deg_b_on = n1_miss_b || n2_miss_b;
++        bool deg_b_on = n1_miss_b || n3_miss_b;
+ 
+         /* ZONE_FAIL: peer missing on BOTH buses */
+         bool zone_fail_n1 = n1_miss_a && n1_miss_b;
+-        bool zone_fail_n2 = n2_miss_a && n2_miss_b;
++        bool zone_fail_n3 = n3_miss_a && n3_miss_b;
+ 
+         /* Update bus health flags */
+         if (deg_a_on) {
+@@ -75,19 +75,19 @@ static void hb_mon_thread_func(void *p1, void *p2, void *p3)
+         } else {
+             atomic_clear_bit(&system_safety_flags, SAFETY_FLAG_ZONE_FAIL_N1);
+         }
+-        if (zone_fail_n2) {
+-            atomic_set_bit(&system_safety_flags, SAFETY_FLAG_ZONE_FAIL_N2);
++        if (zone_fail_n3) {
++            atomic_set_bit(&system_safety_flags, SAFETY_FLAG_ZONE_FAIL_N3);
+         } else {
+-            atomic_clear_bit(&system_safety_flags, SAFETY_FLAG_ZONE_FAIL_N2);
++            atomic_clear_bit(&system_safety_flags, SAFETY_FLAG_ZONE_FAIL_N3);
+         }
+ 
+         /* Check peer reported states */
+         uint8_t n1_state = (uint8_t)atomic_get(&mailbox_n1_state);
+-        uint8_t n2_state = (uint8_t)atomic_get(&mailbox_n2_state);
+-        if (n1_state == CAN_ZONE_STATE_FAULT || n2_state == CAN_ZONE_STATE_FAULT) {
++        uint8_t n3_state = (uint8_t)atomic_get(&mailbox_n3_state);
++        if (n1_state == CAN_ZONE_STATE_FAULT || n3_state == CAN_ZONE_STATE_FAULT) {
+             atomic_set_bit(&system_safety_flags, SAFETY_FLAG_PEER_FAULT);
+-        } else if (!zone_fail_n1 && !zone_fail_n2 &&
+-                   n1_state == CAN_ZONE_STATE_OK && n2_state == CAN_ZONE_STATE_OK) {
++        } else if (!zone_fail_n1 && !zone_fail_n3 &&
++                   n1_state == CAN_ZONE_STATE_OK && n3_state == CAN_ZONE_STATE_OK) {
+             /* If peers are alive and reporting OK, clear peer fault */
+             atomic_clear_bit(&system_safety_flags, SAFETY_FLAG_PEER_FAULT);
+         }
+diff --git a/src/sys/hb_mon.h b/src/sys/hb_mon.h
+index 875d8bc..3cec787 100644
+--- a/src/sys/hb_mon.h
++++ b/src/sys/hb_mon.h
+@@ -2,7 +2,7 @@
+ #define SYS_HB_MON_H
+ 
+ /**
+- * @brief Start the HB_MON task: monitors N1 + N2 heartbeats on both buses,
++ * @brief Start the HB_MON task: monitors N1 + N3 heartbeats on both buses,
+  *        updates ZONE_FAIL flags and drives DEG_A / DEG_B LEDs (R4.7).
+  */
+ void hb_mon_init(void);
+diff --git a/src/sys/hb_tx.c b/src/sys/hb_tx.c
+index e9a3d79..1f090d5 100644
+--- a/src/sys/hb_tx.c
++++ b/src/sys/hb_tx.c
+@@ -55,7 +55,7 @@ static void hb_tx_thread_func(void *p1, void *p2, void *p3)
+             0x00, 0x00, 0x00, 0x00, 0x00,
+         };
+ 
+-        can_send_both(CAN_ID_HB_N3, 8, payload);
++        can_send_both(CAN_ID_HB_N2, 8, payload);
+ 
+         seq = (seq + 1) & 0x0F;
+     }
+diff --git a/src/sys/hb_tx.h b/src/sys/hb_tx.h
+index 9110e2b..be3c20d 100644
+--- a/src/sys/hb_tx.h
++++ b/src/sys/hb_tx.h
+@@ -2,7 +2,7 @@
+ #define SYS_HB_TX_H
+ 
+ /**
+- * @brief Start the HB_TX task: sends HB_N3 (0x102) on both CAN buses every 20ms.
++ * @brief Start the HB_TX task: sends HB_N2 (0x101) on both CAN buses every 20ms.
+  */
+ void hb_tx_init(void);
+ 
+diff --git a/src/sys/health.c b/src/sys/health.c
+index 984449c..6e23ca0 100644
+--- a/src/sys/health.c
++++ b/src/sys/health.c
+@@ -42,7 +42,7 @@ static void send_fault(uint8_t reason)
+ {
+     uint8_t payload[8] = {
+         can_byte0(0, fault_seq & 0x0F),
+-        CAN_ZONE_N3,
++        CAN_ZONE_N2,
+         reason,
+         0x00, 0x00, 0x00, 0x00, 0x00,
+     };
+diff --git a/src/sys/steering.c b/src/sys/steering.c
+index e384af7..9686c2a 100644
+--- a/src/sys/steering.c
++++ b/src/sys/steering.c
+@@ -7,7 +7,6 @@
+ #define STEERING_THREAD_PRIORITY   3
+ #define STEERING_LOOP_DELAY_MS     50
+ 
+-#include "sys/uart_parser.h"
+ 
+ // K_SEM_DEFINE(steering_sem, 0, 1);
+ 
+diff --git a/src/sys/force_tx.h b/src/sys/force_tx.h
+new file mode 100755
+index 0000000..99cf9d1
+--- /dev/null
++++ b/src/sys/force_tx.h
+@@ -0,0 +1,10 @@
++#ifndef SYS_FORCE_TX_H
++#define SYS_FORCE_TX_H
++
++/**
++ * @brief Start the FORCE_TX task: sends FORCE (0x300) on both buses every 50ms.
++ *        Payload byte 1 = force int8 in [-100, 100]. Lab 3: dummy counter.
++ */
++void force_tx_init(void);
++
++#endif /* SYS_FORCE_TX_H */
+diff --git a/src/sys/force_tx.c b/src/sys/force_tx.c
+new file mode 100755
+index 0000000..21eee9c
+--- /dev/null
++++ b/src/sys/force_tx.c
+@@ -0,0 +1,52 @@
++#include "sys/force_tx.h"
++#include <zephyr/kernel.h>
++#include "hw/can.h"
++#include "core/can_catalog.h"
++
++#define FORCE_TX_THREAD_STACK  512
++#define FORCE_TX_THREAD_PRIO   5      /* same level as HB_TX: periodic, 50ms deadline */
++#define FORCE_TX_PERIOD_MS     50
++
++K_SEM_DEFINE(force_tx_sem, 0, 1);
++
++static void force_tx_timer_isr(struct k_timer *t)
++{
++    k_sem_give(&force_tx_sem);
++}
++
++K_TIMER_DEFINE(force_tx_timer, force_tx_timer_isr, NULL);
++
++static void force_tx_thread_func(void *p1, void *p2, void *p3)
++{
++    uint8_t seq = 0;
++    int16_t dummy = -100;   /* Lab 3: dummy counter sweeping -100..100 */
++
++    while (1) {
++        k_sem_take(&force_tx_sem, K_FOREVER);
++
++        uint8_t payload[8] = {
++            can_byte0(0, seq),
++            (uint8_t)(int8_t)dummy,
++            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++        };
++        can_send_both(CAN_ID_FORCE, 8, payload);
++
++        seq = (seq + 1) & 0x0F;
++        dummy = (dummy >= 100) ? -100 : dummy + 1;
++    }
++}
++
++K_THREAD_STACK_DEFINE(force_tx_stack, FORCE_TX_THREAD_STACK);
++static struct k_thread force_tx_thread_data;
++
++void force_tx_init(void)
++{
++    k_timer_start(&force_tx_timer, K_MSEC(FORCE_TX_PERIOD_MS), K_MSEC(FORCE_TX_PERIOD_MS));
++
++    k_thread_create(&force_tx_thread_data, force_tx_stack,
++                    K_THREAD_STACK_SIZEOF(force_tx_stack),
++                    force_tx_thread_func,
++                    NULL, NULL, NULL,
++                    FORCE_TX_THREAD_PRIO, 0, K_NO_WAIT);
++    k_thread_name_set(&force_tx_thread_data, "FORCE_TX");
++}

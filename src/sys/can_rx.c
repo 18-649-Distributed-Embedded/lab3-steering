@@ -3,6 +3,7 @@
 #include <zephyr/drivers/can.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/byteorder.h>
 #include "hw/can.h"
 #include "core/can_catalog.h"
 #include "core/cmd.h"
@@ -15,14 +16,17 @@ static const struct gpio_dt_spec can1_rx_tp = GPIO_DT_SPEC_GET(DT_ALIAS(can1_rx)
 K_SEM_DEFINE(sem_ctrl,  0, 1);
 K_SEM_DEFINE(sem_blink, 0, 1);
 
-atomic_t mailbox_ctrl     = ATOMIC_INIT(127 << 8);  /* throttle=127, brake=0 */
+atomic_t mailbox_ctrl     = ATOMIC_INIT(0);         /* steer=0 (center), buttons=0 */
 atomic_t mailbox_blinker  = ATOMIC_INIT(0);
 atomic_t mailbox_hb_n1_a  = ATOMIC_INIT(0);
 atomic_t mailbox_hb_n1_b  = ATOMIC_INIT(0);
-atomic_t mailbox_hb_n2_a  = ATOMIC_INIT(0);
-atomic_t mailbox_hb_n2_b  = ATOMIC_INIT(0);
+atomic_t mailbox_hb_n3_a  = ATOMIC_INIT(0);
+atomic_t mailbox_hb_n3_b  = ATOMIC_INIT(0);
 atomic_t mailbox_n1_state = ATOMIC_INIT(CAN_ZONE_STATE_OK);
-atomic_t mailbox_n2_state = ATOMIC_INIT(CAN_ZONE_STATE_OK);
+atomic_t mailbox_n3_state = ATOMIC_INIT(CAN_ZONE_STATE_OK);
+
+atomic_t can_rx_count_a = ATOMIC_INIT(0);
+atomic_t can_rx_count_b = ATOMIC_INIT(0);
 
 volatile uint32_t last_ctrl_time = 0;
 
@@ -30,7 +34,7 @@ volatile uint32_t last_ctrl_time = 0;
 #define DEDUP_CTRL    0
 #define DEDUP_FAULT   1
 #define DEDUP_HB_N1   2
-#define DEDUP_HB_N2   3
+#define DEDUP_HB_N3   3
 #define DEDUP_BLINK   4
 #define DEDUP_COUNT   5
 
@@ -43,7 +47,7 @@ static int id_to_dedup_idx(uint32_t id)
     case CAN_ID_CTRL:   return DEDUP_CTRL;
     case CAN_ID_FAULT:  return DEDUP_FAULT;
     case CAN_ID_HB_N1:  return DEDUP_HB_N1;
-    case CAN_ID_HB_N2:  return DEDUP_HB_N2;
+    case CAN_ID_HB_N3:  return DEDUP_HB_N3;
     case CAN_ID_BLINK:  return DEDUP_BLINK;
     default:            return -1;
     }
@@ -87,15 +91,17 @@ static void rx_dispatch(const struct device *dev,
     /* Set RX TP HIGH immediately after SPI read callback fires */
     gpio_pin_set_dt(rx_tp, 1);
 
+    atomic_inc((bus == 0) ? &can_rx_count_a : &can_rx_count_b);
+
     uint32_t now = k_uptime_get_32();
 
     /* Track reception timestamp per bus before deduplication */
     if (frame->id == CAN_ID_HB_N1) {
         if (bus == 0) atomic_set(&mailbox_hb_n1_a, (atomic_val_t)now);
         else          atomic_set(&mailbox_hb_n1_b, (atomic_val_t)now);
-    } else if (frame->id == CAN_ID_HB_N2) {
-        if (bus == 0) atomic_set(&mailbox_hb_n2_a, (atomic_val_t)now);
-        else          atomic_set(&mailbox_hb_n2_b, (atomic_val_t)now);
+    } else if (frame->id == CAN_ID_HB_N3) {
+        if (bus == 0) atomic_set(&mailbox_hb_n3_a, (atomic_val_t)now);
+        else          atomic_set(&mailbox_hb_n3_b, (atomic_val_t)now);
     }
 
     uint8_t seq = can_seq(frame->data[0]);
@@ -103,12 +109,14 @@ static void rx_dispatch(const struct device *dev,
         switch (frame->id) {
 
         case CAN_ID_CTRL: {
-            uint8_t throttle = frame->data[3];
-            uint8_t brake    = frame->data[4];
-            uint8_t buttons  = frame->data[5];
-            uint32_t val = ((uint32_t)buttons  << 16) |
-                           ((uint32_t)throttle <<  8) |
-                           ((uint32_t)brake);
+            /* CTRL payload: [0]=flags|seq [1..2]=steer int16 [3]=throttle
+             * [4]=brake [5]=buttons [6]=CRC-8 [7]=unused
+             * TODO(team): confirm steer byte order with N1. Assumed little-endian.
+             * TODO: CRC-8 + range check -> FAULT (R3, checkoff item 10). */
+            int16_t steer   = (int16_t)sys_get_le16(&frame->data[1]);
+            uint8_t buttons = frame->data[5];
+            uint32_t val = ((uint32_t)buttons << 16) |
+                           (uint32_t)(uint16_t)steer;
             atomic_set(&mailbox_ctrl, (atomic_val_t)val);
             last_ctrl_time = now;
             k_sem_give(&sem_ctrl);
@@ -135,9 +143,9 @@ static void rx_dispatch(const struct device *dev,
             break;
         }
 
-        case CAN_ID_HB_N2: {
+        case CAN_ID_HB_N3: {
             uint8_t zone_state = frame->data[1];
-            atomic_set(&mailbox_n2_state, (atomic_val_t)zone_state);
+            atomic_set(&mailbox_n3_state, (atomic_val_t)zone_state);
             break;
         }
 

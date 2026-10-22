@@ -6,10 +6,10 @@
 #include "core/cmd.h"
 #include "hw/blinkers.h"
 
-#define BLINK_R_THREAD_STACK  512
-#define BLINK_R_THREAD_PRIO   4
+#define BLINK_F_THREAD_STACK  512
+#define BLINK_F_THREAD_PRIO   4
 
-static void blink_r_thread_func(void *p1, void *p2, void *p3)
+static void blink_f_thread_func(void *p1, void *p2, void *p3)
 {
     while (1) {
         /*
@@ -55,18 +55,18 @@ static void blink_r_thread_func(void *p1, void *p2, void *p3)
     }
 }
 
-K_THREAD_STACK_DEFINE(blink_r_stack, BLINK_R_THREAD_STACK);
-static struct k_thread blink_r_thread_data;
+K_THREAD_STACK_DEFINE(blink_f_stack, BLINK_F_THREAD_STACK);
+static struct k_thread blink_f_thread_data;
 
 void blinkers_control_init(void)
 {
     blinkers_set_left(false);
     blinkers_set_right(false);
 
-    k_thread_create(&blink_r_thread_data, blink_r_stack,
-                    K_THREAD_STACK_SIZEOF(blink_r_stack),
-                    blink_r_thread_func,
+    k_thread_create(&blink_f_thread_data, blink_f_stack,
+                    K_THREAD_STACK_SIZEOF(blink_f_stack),
+                    blink_f_thread_func,
                     NULL, NULL, NULL,
-                    BLINK_R_THREAD_PRIO, 0, K_NO_WAIT);
-    k_thread_name_set(&blink_r_thread_data, "BLINK_R");
+                    BLINK_F_THREAD_PRIO, 0, K_NO_WAIT);
+    k_thread_name_set(&blink_f_thread_data, "BLINK_F");
 }

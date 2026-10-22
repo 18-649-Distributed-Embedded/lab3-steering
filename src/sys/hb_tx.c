@@ -5,6 +5,7 @@
 #include "core/can_catalog.h"
 #include "core/cmd.h"
 #include "core/log.h"
+#include "sys/debug_status.h"
 
 #define HB_TX_THREAD_STACK  512
 #define HB_TX_THREAD_PRIO   5
@@ -55,7 +56,14 @@ static void hb_tx_thread_func(void *p1, void *p2, void *p3)
             0x00, 0x00, 0x00, 0x00, 0x00,
         };
 
-        can_send_both(CAN_ID_HB_N3, 8, payload);
+        /* R4.5 / S5: a self-failed zone (test button) stops its heartbeat
+         * on both buses. Every other error state keeps transmitting. */
+        bool sent = false;
+        if (!atomic_test_bit(&system_safety_flags, SAFETY_FLAG_ZONE_FAIL_SELF)) {
+            can_send_both(CAN_ID_HB_N2, 8, payload);
+            sent = true;
+        }
+        debug_status_on_heartbeat(seq, sent);
 
         seq = (seq + 1) & 0x0F;
     }

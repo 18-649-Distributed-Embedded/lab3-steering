@@ -9,5 +9,6 @@
 
 int servo_init(void);
 void servo_set_pulse_ns(uint32_t pulse_ns);
+uint32_t servo_get_pulse_ns(void);   /* last pulse written (after clamping) */
 
 #endif // HW_SERVO_H

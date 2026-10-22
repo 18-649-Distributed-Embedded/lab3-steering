@@ -2,7 +2,7 @@
 #define SYS_HB_TX_H
 
 /**
- * @brief Start the HB_TX task: sends HB_N3 (0x102) on both CAN buses every 20ms.
+ * @brief Start the HB_TX task: sends HB_N2 (0x101) on both CAN buses every 20ms.
  */
 void hb_tx_init(void);
 

@@ -20,12 +20,12 @@
 
         led_right: right {
             gpios = <&gpiob 5 GPIO_ACTIVE_HIGH>;
-            label = "Rear Right Turn Signal";
+            label = "Front Right Turn Signal (FR)";
         };
 
         led_left: left {
             gpios = <&gpiob 4 GPIO_ACTIVE_HIGH>;
-            label = "Rear Left Turn Signal";
+            label = "Front Left Turn Signal (FL)";
         };
     };
 };
@@ -137,4 +137,14 @@
         can0-tx = &can0_tx_tp;
         can1-tx = &can1_tx_tp;
     };
+};
+// PB6 is used by TIM4_CH1 (servo). The board DTS also assigns PB6 to
+// USART1 TX and SPI1 CS. Neither is used here (console = USART2,
+// CAN = SPI2/SPI3), so disable them to avoid a pin conflict.
+&usart1 {
+    status = "disabled";
+};
+
+&spi1 {
+    status = "disabled";
 };

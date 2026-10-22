@@ -42,7 +42,7 @@ static void send_fault(uint8_t reason)
 {
     uint8_t payload[8] = {
         can_byte0(0, fault_seq & 0x0F),
-        CAN_ZONE_N3,
+        CAN_ZONE_N2,
         reason,
         0x00, 0x00, 0x00, 0x00, 0x00,
     };

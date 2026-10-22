@@ -27,13 +27,15 @@ static void hb_tx_thread_func(void *p1, void *p2, void *p3)
     while (1) {
         k_sem_take(&hb_tx_sem, K_FOREVER);
 
-        /* Determine zone state */
-        atomic_val_t safety = atomic_get(&system_safety_flags);
-        atomic_val_t busfl  = atomic_get(&bus_health_flags);
+        /* Report THIS zone's own health, not the system error state.
+         * A zone in error only because of a peer reports OK about itself;
+         * otherwise every node echoes FAULT back and they keep each other
+         * latched in PEER_FAULT forever. */
+        atomic_val_t busfl = atomic_get(&bus_health_flags);
 
         uint8_t zone_state;
-        if (safety != 0) {
-            zone_state = CAN_ZONE_STATE_FAULT;
+        if (atomic_test_bit(&system_safety_flags, SAFETY_FLAG_ZONE_FAIL_SELF)) {
+            zone_state = CAN_ZONE_STATE_FAULT;   /* (HB is suppressed in this state) */
         } else if (busfl != 0) {
             zone_state = CAN_ZONE_STATE_DEGRADED;
         } else {

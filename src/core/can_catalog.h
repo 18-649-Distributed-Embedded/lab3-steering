@@ -17,6 +17,9 @@
 
 /* ── Message IDs ─────────────────────────────────────────── */
 #define CAN_ID_CTRL    0x010U   /* N1 → N2, N3   | period 20ms  | deadline 2ms   */
+/* CTRL payload: [0] flags|seq  [1..2] steer int16 BIG-endian (byte 1 = high)
+ *               [3] throttle  [4] brake  [5] buttons  [6] CRC-8  [7] unused
+ * Steer range: -32768 (full left) .. 0 (center) .. 32767 (full right) */
 #define CAN_ID_FAULT   0x020U   /* any → all     | event/20ms   | deadline 100ms */
 #define CAN_ID_HB_N1   0x100U   /* N1 → N2, N3   | period 20ms  | deadline 20ms  */
 #define CAN_ID_HB_N2   0x101U   /* N2 → N1, N3   | period 20ms  | deadline 20ms  */

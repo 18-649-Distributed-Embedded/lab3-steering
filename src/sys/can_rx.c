@@ -67,8 +67,17 @@ static bool dedup_accept(uint32_t id, uint8_t seq)
         last_seq[idx] = 0xFF;
     }
 
-    if (last_seq[idx] == seq) {
-        return false;   /* duplicate from the other bus */
+    /* Accept only frames NEWER than the last accepted one (4-bit modular).
+     * diff 0     = duplicate copy from the other bus
+     * diff 8..15 = an OLDER copy arriving late on the other bus; accepting
+     *              it would roll state back (e.g. the servo snapping back).
+     * After a gap > 100 ms the state is reset above, so a rebooted sender's
+     * new sequence is always accepted. */
+    if (last_seq[idx] != 0xFF) {
+        uint8_t diff = (uint8_t)(seq - last_seq[idx]) & 0x0F;
+        if (diff == 0 || diff > 7) {
+            return false;
+        }
     }
 
     last_seq[idx] = seq;
@@ -111,9 +120,10 @@ static void rx_dispatch(const struct device *dev,
         case CAN_ID_CTRL: {
             /* CTRL payload: [0]=flags|seq [1..2]=steer int16 [3]=throttle
              * [4]=brake [5]=buttons [6]=CRC-8 [7]=unused
-             * TODO(team): confirm steer byte order with N1. Assumed little-endian.
+             * Steer is BIG-endian on the wire (byte 1 = high, byte 2 = low),
+             * confirmed against N1 with candump.
              * TODO: CRC-8 + range check -> FAULT (R3, checkoff item 10). */
-            int16_t steer   = (int16_t)sys_get_le16(&frame->data[1]);
+            int16_t steer   = (int16_t)sys_get_be16(&frame->data[1]);
             uint8_t buttons = frame->data[5];
             uint32_t val = ((uint32_t)buttons << 16) |
                            (uint32_t)(uint16_t)steer;

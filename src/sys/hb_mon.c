@@ -87,7 +87,8 @@ static void hb_mon_thread_func(void *p1, void *p2, void *p3)
         if (n1_state == CAN_ZONE_STATE_FAULT || n3_state == CAN_ZONE_STATE_FAULT) {
             atomic_set_bit(&system_safety_flags, SAFETY_FLAG_PEER_FAULT);
         } else if (!zone_fail_n1 && !zone_fail_n3 &&
-                   n1_state == CAN_ZONE_STATE_OK && n3_state == CAN_ZONE_STATE_OK) {
+                   n1_state != CAN_ZONE_STATE_FAULT && n3_state != CAN_ZONE_STATE_FAULT) {
+            /* DEGRADED (one bus down) is not a fault: it must not block recovery */
             /* If peers are alive and reporting OK, clear peer fault */
             atomic_clear_bit(&system_safety_flags, SAFETY_FLAG_PEER_FAULT);
         }

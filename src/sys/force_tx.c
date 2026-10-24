@@ -5,7 +5,7 @@
 #include "core/cmd.h"
 
 #define FORCE_TX_THREAD_STACK  512
-#define FORCE_TX_THREAD_PRIO   5      /* same level as HB_TX: periodic, 50ms deadline */
+#define FORCE_TX_THREAD_PRIO   8      /* periodic, 50 ms deadline */
 #define FORCE_TX_PERIOD_MS     50
 
 K_SEM_DEFINE(force_tx_sem, 0, 1);

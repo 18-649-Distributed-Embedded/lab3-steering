@@ -4,6 +4,7 @@
 #include "hw/blinkers.h"
 #include "hw/can.h"
 #include "sys/can_rx.h"
+#include "sys/relay.h"
 #include "sys/steering.h"
 #include "sys/blinkers_control.h"
 #include "sys/hb_tx.h"
@@ -29,13 +30,14 @@ int main(void)
     /* ── System tasks (in priority order, lowest number = highest prio) ── */
     DEBUG_PRINT("[SYS] Starting tasks...\n");
 
-    can_rx_init();           /* prio 2 (MCP2515 driver thread) — RX dispatch  */
-    health_init();           /* prio 3 — TEST_BTN + watchdog                  */
-    steering_init();         /* prio 3 — STEER (servo PWM on CTRL)             */
-    blinkers_control_init(); /* prio 4 — BLINK_F (front LEDs on BLINK)         */
-    hb_tx_init();            /* prio 5 — HB_TX (0x101 every 20ms)              */
-    force_tx_init();         /* prio 5 — FORCE_TX (0x300 every 50ms, dummy)    */
-    hb_mon_init();           /* prio 6 — HB_MON + DEG_A/B LEDs (every 20ms)   */
+    relay_init();            /* prio 2 — RELAY (5 ms check, forwards frames)  */
+    can_rx_init();           /* prio 1 (MCP2515 driver thread) — RX dispatch  */
+    blinkers_control_init(); /* prio 3 — BLINK_F (front LEDs on BLINK)        */
+    steering_init();         /* prio 4 — STEER (servo PWM on CTRL)            */
+    health_init();           /* prio 5 — TEST_BTN, prio 9 — watchdog          */
+    hb_tx_init();            /* prio 6 — HB_TX (0x101 every 20ms)             */
+    hb_mon_init();           /* prio 7 — HB_MON, conn rows, DEG LEDs, ERR     */
+    force_tx_init();         /* prio 8 — FORCE_TX (0x300 every 50ms, dummy)   */
     debug_status_init();     /* prio 10 — STAT line per heartbeat (debug)     */
 
     DEBUG_PRINT("=== Initialization complete. Zephyr scheduler active. ===\n");

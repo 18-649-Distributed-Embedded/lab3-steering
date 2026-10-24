@@ -8,6 +8,7 @@
 #include "core/can_catalog.h"
 #include "core/cmd.h"
 #include "core/log.h"
+#include "sys/relay.h"
 
 static const struct gpio_dt_spec can0_rx_tp = GPIO_DT_SPEC_GET(DT_ALIAS(can0_rx), gpios);
 static const struct gpio_dt_spec can1_rx_tp = GPIO_DT_SPEC_GET(DT_ALIAS(can1_rx), gpios);
@@ -87,7 +88,7 @@ static bool dedup_accept(uint32_t id, uint8_t seq)
 
 /* ── Dispatch Callback ───────────────────────────────────── */
 /*
- * Called from the MCP2515 driver thread (priority 2).
+ * Called from the MCP2515 driver thread (priority 1, see prj.conf).
  * user_data: 0 = bus A, 1 = bus B.
  */
 static void rx_dispatch(const struct device *dev,
@@ -113,6 +114,11 @@ static void rx_dispatch(const struct device *dev,
         else          atomic_set(&mailbox_hb_n3_b, (atomic_val_t)now);
     }
 
+    /* Relay hook: cache for priming, and queue for forwarding if relay mode
+     * is active. Before dedup so the forwarded copy leaves as early as
+     * possible (it is on the brake chain). Non-blocking. */
+    relay_on_rx(bus, frame);
+
     uint8_t seq = can_seq(frame->data[0]);
     if (dedup_accept(frame->id, seq)) {
         switch (frame->id) {
@@ -136,6 +142,7 @@ static void rx_dispatch(const struct device *dev,
         case CAN_ID_FAULT: {
             uint8_t zone_id = frame->data[1];
             uint8_t reason  = frame->data[2];
+            (void)zone_id;   /* only used by DEBUG_PRINT */
             if (reason == 0) {
                 /* Fault cleared */
                 atomic_clear_bit(&system_safety_flags, SAFETY_FLAG_PEER_FAULT);
@@ -213,4 +220,3 @@ void can_rx_init(void)
 
     DEBUG_PRINT("CAN RX dispatch registered on both buses\n");
 }
-

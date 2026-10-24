@@ -2,12 +2,14 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
 #include "sys/can_rx.h"
+#include "sys/hb_mon.h"
+#include "core/conn_state.h"
 #include "core/cmd.h"
 #include "hw/servo.h"
 
 #define STEERING_THREAD_STACK_SIZE 1024
-#define STEERING_THREAD_PRIORITY   3
-#define STEERING_MAX_WAIT_MS       50      /* R2.3: servo within 50 ms */
+#define STEERING_THREAD_PRIORITY   4       /* local deadline 1 ms (DM order) */
+#define STEERING_MAX_WAIT_MS       20      /* re-check connection row at HB_MON rate */
 
 /*
  * Steer -> servo mapping (team-defined values table: keep these in sync).
@@ -32,9 +34,32 @@ static uint32_t steer_to_pulse_ns(int16_t steer)
 
 static void steering_thread_func(void *p1, void *p2, void *p3)
 {
+    bool holding = true;   /* boot = row 10 (isolated); servo_init centered it */
+
     while (1) {
-        /* Wake on each new CTRL; time out so the loop never sleeps > 50 ms */
-        if (k_sem_take(&sem_ctrl, K_MSEC(STEERING_MAX_WAIT_MS)) != 0) {
+        /* Wake on each new CTRL, or every 20 ms to re-check the row */
+        int got_ctrl = (k_sem_take(&sem_ctrl, K_MSEC(STEERING_MAX_WAIT_MS)) == 0);
+
+        /* Rows 6 (N1 lost) and 10 (N2 isolated): no valid wheel input.
+         * Center the servo ONCE, then hold it there and ignore CTRL. */
+        enum conn_row row = (enum conn_row)atomic_get(&conn_row_slow);
+        if (conn_action_for(row).center_hold) {
+            if (!holding) {
+                servo_set_pulse_ns(SERVO_CENTER_PULSE_NS);
+                holding = true;
+            }
+            continue;
+        }
+
+        /* Leaving the hold: discard any CTRL that arrived before the release
+         * and take the position from the NEXT fresh CTRL. */
+        if (holding) {
+            holding = false;
+            k_sem_reset(&sem_ctrl);
+            continue;
+        }
+
+        if (!got_ctrl) {
             continue;   /* no new command: hold current position */
         }
 

@@ -34,7 +34,7 @@ static void btn_isr(const struct device *dev,
 }
 
 #define BTN_THREAD_STACK  512
-#define BTN_THREAD_PRIO   3    /* on the fault chain */
+#define BTN_THREAD_PRIO   5    /* on the fault chain, deadline 10 ms */
 
 static uint8_t fault_seq = 0;
 
@@ -92,7 +92,7 @@ static void btn_thread_func(void *p1, void *p2, void *p3)
 /* ── Watchdog ────────────────────────────────────────────── */
 #define WATCHDOG_TIMEOUT_MS  150U
 #define WATCHDOG_STACK       512
-#define WATCHDOG_PRIO        7    /* background safety check */
+#define WATCHDOG_PRIO        9    /* background safety check, 150 ms */
 
 static void watchdog_thread_func(void *p1, void *p2, void *p3)
 {

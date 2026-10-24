@@ -128,6 +128,15 @@
             gpios = <&gpioc 7 GPIO_ACTIVE_HIGH>;
             label = "CAN1 TX Test Point";
         };
+        /* Lab 3 test points (rows 12 and 13 of the N2 test-point board) */
+        relay_tx_tp: relay_tx {
+            gpios = <&gpioa 8 GPIO_ACTIVE_HIGH>;    /* PA8 = Arduino D7 */
+            label = "RELAY_TX Test Point";
+        };
+        err_tp: err {
+            gpios = <&gpioa 9 GPIO_ACTIVE_HIGH>;    /* PA9 = Arduino D8 */
+            label = "ERR Test Point";
+        };
     };
     aliases {
         deg-a = &deg_a_led;
@@ -136,6 +145,8 @@
         can1-rx = &can1_rx_tp;
         can0-tx = &can0_tx_tp;
         can1-tx = &can1_tx_tp;
+        relay-tx = &relay_tx_tp;
+        err-tp = &err_tp;
     };
 };
 // PB6 is used by TIM4_CH1 (servo). The board DTS also assigns PB6 to
@@ -146,5 +157,11 @@
 };
 
 &spi1 {
+    status = "disabled";
+};
+
+// The board DTS enables I2C3 on PA8 (SCL) and PC9 (SDA). PC9 is DEG_B and
+// PA8 is RELAY_TX here, and nothing uses I2C3, so disable it.
+&i2c3 {
     status = "disabled";
 };

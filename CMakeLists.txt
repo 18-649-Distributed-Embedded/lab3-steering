@@ -5,6 +5,9 @@ project(lab3_steering)
 target_sources(app PRIVATE
     src/main.c
 
+    # Pure logic (also built by tests/host)
+    src/core/conn_state.c
+
     # Hardware drivers
     src/hw/servo.c
     src/hw/adc.c
@@ -13,6 +16,7 @@ target_sources(app PRIVATE
 
     # System tasks
     src/sys/can_rx.c
+    src/sys/relay.c
     src/sys/steering.c
     src/sys/blinkers_control.c
     src/sys/hb_tx.c

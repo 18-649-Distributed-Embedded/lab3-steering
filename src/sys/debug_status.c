@@ -8,6 +8,9 @@
 #include "hw/can.h"
 #include "hw/servo.h"
 #include "sys/can_rx.h"
+#include "sys/hb_mon.h"
+#include "sys/relay.h"
+#include "core/conn_state.h"
 #include "core/cmd.h"
 
 #define STAT_STALL_MS  100   /* print anyway if no heartbeat tick for this long */
@@ -61,15 +64,26 @@ static void stat_thread(void *p1, void *p2, void *p3)
         atomic_val_t hb = atomic_get(&stat_hb);
         uint32_t ctrl   = (uint32_t)atomic_get(&mailbox_ctrl);
 
-        printk("[HB %2u t=%u] A:%s %u/%u B:%s %u/%u rx %ld/%ld sf=%02lx DEG A%d B%d"
+        uint8_t bits = (uint8_t)atomic_get(&conn_bits_slow);
+        enum conn_row row = (enum conn_row)atomic_get(&conn_row_slow);
+        struct conn_action act = conn_action_for(row);
+        int rly = (int)atomic_get(&relay_active_row);
+
+        /* conn = N1A N1B N3A N3B (1 heard / 0 lost), row = spec row 1..12,
+         * DEG = LED mode (- off, f 1 Hz, s 0.5 Hz, S steady),
+         * rly = active relay row (0 = none) / frames forwarded since boot */
+        printk("[HB %2u t=%u] A:%s %u/%u B:%s %u/%u rx %ld/%ld sf=%02lx"
+               " conn %c%c%c%c row %2d DEG %c%c rly %d/%ld"
                " | CTRL %u st=%d srv=%u | N1 %u/%u N3 %u/%u%s\n",
                (unsigned)((hb >> 1) & 0x0F), now,
                st(sa), ea.tx_err_cnt, ea.rx_err_cnt,
                st(sb), eb.tx_err_cnt, eb.rx_err_cnt,
                (long)(ra - prev_a), (long)(rb - prev_b),
                (unsigned long)atomic_get(&system_safety_flags),
-               atomic_test_bit(&bus_health_flags, BUS_FLAG_DEG_A) ? 1 : 0,
-               atomic_test_bit(&bus_health_flags, BUS_FLAG_DEG_B) ? 1 : 0,
+               (bits & CONN_N1A) ? '1' : '0', (bits & CONN_N1B) ? '1' : '0',
+               (bits & CONN_N3A) ? '1' : '0', (bits & CONN_N3B) ? '1' : '0',
+               (int)row, deg_led_char(act.led_a), deg_led_char(act.led_b),
+               rly, (long)atomic_get(&relay_tx_count),
                age(now, last_ctrl_time), (int)(int16_t)(ctrl & 0xFFFF),
                servo_get_pulse_ns() / 1000U,
                age(now, (uint32_t)atomic_get(&mailbox_hb_n1_a)),
